@@ -6,7 +6,7 @@
 #include <proton/reconnect_options.hpp>
 
 #include "messagerelayeramqp.h"
-#include "sample_quad_final.h"
+#include "quadkey_ts_simple.h"
 
 #include <iostream>
 #include <unistd.h>
@@ -19,8 +19,20 @@ bool msgrelayerAMQP::wait_sender_ready(void) {
 	return m_sender_ready;
 }
 
+bool msgrelayerAMQP::wait_sender_ready(std::atomic<bool> *terminatorFlag) {
+	if(terminatorFlag==nullptr) {
+		return false;
+	}
+
+	// We should not need any mutex lock, as m_sender_ready is defined as std::atomic<bool>
+	// Waiting for the sender to become ready, i.e. waiting for m_sender_ready to become "true"
+	while(!m_sender_ready && *terminatorFlag==false);
+
+	return m_sender_ready & !*terminatorFlag;
+}
+
 void msgrelayerAMQP::sendMessage_AMQP(uint8_t *buffer, int bufsize,const double &lat, const double &lon, const int &lev) {
-    QuadKeys::QuadKeyTS tilesys;
+    QuadKeys::QuadKeyTSSimple tilesys;
 	const double latitude = lat;
 	const double longitude = lon;
 

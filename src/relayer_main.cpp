@@ -5,8 +5,10 @@
 #include <sys/socket.h>
 #include <stdlib.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <cstring>
 
 #include <proton/connection.hpp>
 #include <proton/delivery.hpp>
@@ -20,31 +22,56 @@
 // TCLAP headers
 #include "tclap/CmdLine.h"
 
+// Internal headers
 #include "messagerelayeramqp.h"
-#include "sample_quad_final.h"
+
+// Value for an infinite timeout for poll()
+// Any negative value disables timeout and makes poll() waiting indefinitely for new events 
+// (i.e., eiter packets or writes on the "unlock pipe" to gracefully terminate the relayer)
+#define INDEFINITE_BLOCK -1
 
 // Global atomic flag to terminate the whole program in case of errors
 std::atomic<bool> terminatorFlag;
 
+double retry_interval_seconds=0.0;
+
 // Thread callback function
 void *msgrelayer_callback(void *arg) {
 	msgrelayerAMQP *cr_AMQP_class_ptr=static_cast<msgrelayerAMQP *>(arg);
+	int unlock_pd_wr=cr_AMQP_class_ptr->getUnlockPipeDescriptorWrite();
 
 	// Checking this just as a matter of additional safety
 	if(cr_AMQP_class_ptr!=NULL) {
-		try {
-			// Create a new Qpid Proton container and run it to start the AMQP 1.0 event loop
-			proton::container(*cr_AMQP_class_ptr).run();
+		while(terminatorFlag==false) {
+			try {
+				// Create a new Qpid Proton container and run it to start the AMQP 1.0 event loop
+				proton::container(*cr_AMQP_class_ptr).run();
 
-			pthread_exit(NULL);
-		} catch (const std::exception& e) {
-			std::cerr << "Qpid Proton library error while running CAMrelayerAMQP. Please find more details below." << std::endl;
-			std::cerr << e.what() << std::endl;
-			terminatorFlag = true;
+				pthread_exit(NULL);
+			} catch (const std::exception& e) {
+				std::cerr << "Qpid Proton library error while running CAMrelayerAMQP. Please find more details below." << std::endl;
+				std::cerr << e.what() << std::endl;
+
+				if(retry_interval_seconds<=0) {
+					terminatorFlag = true;
+					if(unlock_pd_wr<=0 || write(unlock_pd_wr,"\0",1)<0) {
+						fprintf(stderr,"Warning: could not gracefully terminate the AMQP client thread.\n"
+							"Its termination will be forced.\n");
+						exit(EXIT_FAILURE);
+					}
+				} else {
+					usleep(retry_interval_seconds*1e6);
+				}
+			}
 		}
 	} else {
 		std::cerr << "Error. NULL CAMrelayerAMQP object. Cannot start the AMQP client." << std::endl;
 		terminatorFlag = true;
+		if(unlock_pd_wr<=0 || write(unlock_pd_wr,"\0",1)<0) {
+			fprintf(stderr,"Warning: could not gracefully terminate the AMQP client thread.\n"
+				"Its termination will be forced.\n");
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	// Even if this thread will run forever (then, we can think also about adding, in the future, some way to gracefully terminated it)
@@ -111,6 +138,9 @@ int main(int argc, char *argv[]) {
 		TCLAP::ValueArg<int> amqp_idle_timeout_msArg("t","amqp-idle-timeout","Set the AMQP connection idle timeout. Any value < 0 will keep the default Qpid Proton AMQP library setting, while a value equal to 0 means setting the idle timeout to FOREVER (i.e., disable the idle timeout).",false,-1,"int");
 		cmd.add(amqp_idle_timeout_msArg);
 
+		TCLAP::ValueArg<double> retryIntervalArg("R","retry-interval","Setting this option will make the relayer periodically retry connecting to the broker, if a connection is not possible, or if it gets disconnected. A retry interval in seconds should be specified. A value equal to 0 will make the relayer terminate with an error in case of disconnection.",false,0.0,"double");
+		cmd.add(retryIntervalArg);
+
 		cmd.parse(argc,argv);
 
 		cam_args.m_broker_address=urlArg.getValue();
@@ -127,9 +157,19 @@ int main(int argc, char *argv[]) {
 		amqp_allow_plain=amqp_allow_plainArg.getValue();
 		amqp_idle_timeout_ms=amqp_idle_timeout_msArg.getValue();
 
+		retry_interval_seconds=retryIntervalArg.getValue();
+
 		std::cout << "The relayer will connect to " + cam_args.m_broker_address + "/" + cam_args.m_queue_name << std::endl;
 	} catch (TCLAP::ArgException &tclape) { 
 		std::cerr << "TCLAP error: " << tclape.error() << " for argument " << tclape.argId() << std::endl;
+	}
+
+	// Create a pipe for the graceful termination of the relayer in case of errors
+	int unlock_pd[2];
+
+	if(pipe(unlock_pd)<0) {
+		std::cerr << "Error: could not create the pipe for the graceful termination of the AMQP client thread." << std::endl;
+		exit(EXIT_FAILURE);
 	}
 
 	// CAM relayer object
@@ -140,6 +180,9 @@ int main(int argc, char *argv[]) {
 	pthread_attr_t tattr;
 	// CAM Relayer Thread ID
 	pthread_t curr_tid;
+
+	// Store the "write" pipe descriptor into the msgrelayerAMQP object (to enable an easy retrieval in the AMQP client thread)
+	msg_relayer_obj.setUnlockPipeDescriptorWrite(unlock_pd[1]);
 
 	// Set the terminator flag to false
 	terminatorFlag = false;
@@ -174,7 +217,7 @@ int main(int argc, char *argv[]) {
 
 	std::cout << "Waiting for the AMQP sender to be ready..." << std::endl;
 
-	sender_ready_status=msg_relayer_obj.wait_sender_ready();
+	sender_ready_status=msg_relayer_obj.wait_sender_ready(&terminatorFlag);
 
 	std::cout << "Sender should be ready. Status (0 = error, 1 = ok): " << sender_ready_status << std::endl;
 
@@ -215,26 +258,48 @@ int main(int argc, char *argv[]) {
 	}
 
 	int recv_bytes;
+	struct pollfd rxMon[2];
+
+	rxMon[0].fd=sfd;
+	rxMon[0].revents=0;
+	rxMon[0].events=POLLIN;
+
+	rxMon[1].fd=unlock_pd[0];
+	rxMon[1].revents=0;
+	rxMon[1].events=POLLIN;
 
 	while(terminatorFlag==false) {
-		recv_bytes = recvfrom(sfd, buffer, buf_length, 0, NULL, NULL);
+		if(poll(rxMon,2,INDEFINITE_BLOCK)>0) {
+			// Poll unlocked via received message: parse and relay the received data
+			if(rxMon[0].revents>0) {
+				recv_bytes = recvfrom(sfd, buffer, buf_length, 0, NULL, NULL);
 
-		// Discard all the received messages with a message size smaller than minimum_msg_size bytes
-		if(recv_bytes < minimum_msg_size) {
-			continue;
-		}
+				// Discard all the received messages with a message size smaller than minimum_msg_size bytes
+				if(recv_bytes < minimum_msg_size) {
+					continue;
+				}
 
-		if(quadk_enable==true) {
-			latlon_t curr_coordinates;
-			memcpy(&curr_coordinates,(void *) buffer, sizeof(latlon_t));
-			double lat = (double) ntohl(curr_coordinates.lat)/1e7;
-			double lon = (double) ntohl(curr_coordinates.lon)/1e7;
+				if(quadk_enable==true) {
+					latlon_t curr_coordinates;
+					memcpy(&curr_coordinates,(void *) buffer, sizeof(latlon_t));
+					double lat = (double)((int) ntohl(curr_coordinates.lat))/1e7;
+					double lon = (double)((int) ntohl(curr_coordinates.lon))/1e7;
 
-			msg_relayer_obj.sendMessage_AMQP(((uint8_t*)buffer)+sizeof(latlon_t),((int)recv_bytes)-sizeof(latlon_t),lat,lon,18);
-		} else {
-			msg_relayer_obj.sendMessage_AMQP(((uint8_t*)buffer),((int)recv_bytes));
+					msg_relayer_obj.sendMessage_AMQP(((uint8_t*)buffer)+sizeof(latlon_t),((int)recv_bytes)-sizeof(latlon_t),lat,lon,18);
+				} else {
+					msg_relayer_obj.sendMessage_AMQP(((uint8_t*)buffer),((int)recv_bytes));
+				}
+			} else if(rxMon[1].revents>0) {
+				std::cerr << "The UDP-AMQP relayer has terminated due to an error." << std::endl;
+				// Poll unlocked via pipe: just break out of the loop
+				break;
+			}
 		}
 	}
+
+	close(sfd);
+	close(unlock_pd[0]);
+	close(unlock_pd[1]);
 
 	return 0;
 

@@ -31,6 +31,7 @@ class msgrelayerAMQP : public proton::messaging_handler {
 	bool m_allow_sasl=false;
 	bool m_allow_plain=false;
 	long m_idle_timeout_ms=-1;
+	int m_unlock_pd_wr=-1;
 
 	// Qpid Proton event callbacks
 	void on_container_start(proton::container& c) override;
@@ -59,6 +60,7 @@ class msgrelayerAMQP : public proton::messaging_handler {
 		// The application, after starting the container with run(), should call wait_sender_ready()
 		// before attempting any call to sendMessage_AMQP(), otherwise messages may not be relayed
 		bool wait_sender_ready(void);
+		bool wait_sender_ready(std::atomic<bool> *terminatorFlag);
 
 		// Set credentials/configuration options
 		void setUsername(std::string username) {
@@ -85,6 +87,14 @@ class msgrelayerAMQP : public proton::messaging_handler {
 
 		void setIdleTimeout(long idle_timeout_ms) {
 			m_idle_timeout_ms=idle_timeout_ms;
+		}
+
+		void setUnlockPipeDescriptorWrite(int unlock_pd_wr) {
+			m_unlock_pd_wr=unlock_pd_wr;
+		}
+
+		int getUnlockPipeDescriptorWrite(void) {
+			return m_unlock_pd_wr;
 		}
 };
 
