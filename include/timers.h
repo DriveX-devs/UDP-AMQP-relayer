@@ -5,6 +5,7 @@
 #include <poll.h>
 
 #define NO_FLAGS_TIMER 0
+#define INDEFINITE_WAIT -1
 
 // Time conversion constants
 #define SEC_TO_NANOSEC 1000000000

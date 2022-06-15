@@ -3,6 +3,10 @@
 #include <unistd.h>
 #include <sys/timerfd.h>
 
+#include <errno.h>
+#include <cstring>
+#include <iostream>
+
 #define POLL_DEFINE_JUNK_VARIABLE() long int junk
 #define POLL_CLEAR_EVENT(clockFd) junk=read(clockFd,&junk,sizeof(junk))
 
@@ -41,7 +45,7 @@ Timer::start() {
 		return false;
 	}
 
-	return 0;
+	return true;
 }
 
 bool 
@@ -88,7 +92,7 @@ bool
 Timer::waitForExpiration() {
 	POLL_DEFINE_JUNK_VARIABLE();
 
-	if(poll(&m_timerMon,1,0)>0) {
+	if(poll(&m_timerMon,1,INDEFINITE_WAIT)>0) {
 		POLL_CLEAR_EVENT(m_clock_fd);
 		return true;
 	}
