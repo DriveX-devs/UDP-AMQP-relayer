@@ -96,7 +96,7 @@ int main(int argc, char *argv[]) {
 
 	// Parse the command line options with the TCLAP library
 	try {
-		TCLAP::CmdLine cmd("S-LDM Testing Facilities - UDP->AMQP 1.0 relayer", ' ', "1.0");
+		TCLAP::CmdLine cmd("UDP->AMQP 1.0 relayer", ' ', "1.1");
 
 		// Arguments: short option, long option, description, is it mandatory?, default value, type indication (just a string to help the user)
 		TCLAP::ValueArg<std::string> urlArg("U","url","Broker URL (with port)",true,"127.0.0.1:5672","string");
