@@ -4,6 +4,10 @@ This repository contains a simple, yet efficient, UDP to AMQP 1.0 message relaye
 
 This relayer is able to receive any UDP message from a given port, and relay it to any AMQP 1.0 broker, given a certain queue or topic.
 
+Before compiling, you need to install the following dependency: `libqpid-proton-cpp12-dev`
+
+Under Ubuntu, it can be installed with: `sudo apt install libqpid-proton-cpp12-dev`
+
 In order to compile the relayer, you can use the Makefile included in this directory. You can thus compile the relayer executable simply with `make`.
 You can then launch the UDP->AMQP relayer with: `./UDPAMQPrelayer --url <broker url> --queue <queue or topic name>`.
 
